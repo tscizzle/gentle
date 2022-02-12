@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn
 
-from parseTextGrid import TextGrid
+import parseTextGrid
 
 
 ########################################################################################
@@ -21,8 +21,9 @@ from parseTextGrid import TextGrid
 
 
 def main():
-    timitDirpath = "/home/tyler/Documents/ProgrammyStuff/gentle/TIMIT_Tweaked/"
-    createReportComparingTimitAndGentle(timitDirpath)
+    createReportComparingGentleAndOther(
+        "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/Sergey_Dataset"
+    )
 
 
 ########################################################################################
@@ -30,17 +31,20 @@ def main():
 ########################################################################################
 
 
-def createReportComparingTimitAndGentle(timitDirpath):
-    """Go through every folder within TIMIT and look at all the .textGrid files (which
-    should have been generated to compare Gentle and TIMIT's phone timings.) Make charts
-    describing the aggregate results of all the comparisons. These charts report on
-    stuff like average timing diff, distribution of timing diffs, what phones did
-    Gentle have trouble with, which phones were replaced for others, etc.
+def createReportComparingGentleAndOther(rootDir, reportsDir="./comparisonReports"):
+    """Go through every folder in a directory and look at all the Gentle output JSON
+    files (which should have had an associated .textGrid file generated to compare
+    Gentle and Other's phone timings.) Make charts describing the aggregate results of
+    all the comparisons. These charts report on stuff like average timing diff,
+    distribution of timing diffs, what phones did Gentle have trouble with, which phones
+    were replaced for others, etc.
 
-    :param str timitDirpath: Path to root of directory structure to traverse and find
-        all the .textGrid files.
+    :param str rootDir: Path to root of directory structure to traverse and find
+        all the Gentle output and .textGrid files.
+    :param str reportsDir: Absolute or relative path (relative to where the script is
+        run from) to where we want to save the reports (.png's of charts, etc.)
 
-    No return value. Instead, display a bunch of charts.
+    No return value. Instead, save a bunch of files to disk.
     """
 
     #####
@@ -56,27 +60,35 @@ def createReportComparingTimitAndGentle(timitDirpath):
     numSentencesIncluded = 0
     numSentencesExcluded = 0
 
-    for path, dirs, files in os.walk(timitDirpath):
+    for path, dirs, files in os.walk(rootDir):
         for filename in files:
-            if filename.endswith(".textGrid"):
-                filepath = os.path.join(path, filename)
-                fileResults = compareTimitAndGentleTextGridTiers(filepath)
+            if filename.endswith("_gentlePhoneTimings.json"):
+                filenameBase = filename.split("_gentlePhoneTimings.json")[0]
+                textGridFilename = f"{filenameBase}.textGrid"
+                textGridFilepath = os.path.join(path, textGridFilename)
+                try:
+                    fileResults = compareGentleAndOtherTextGridTiers(textGridFilepath)
+                except TextGridException:
+                    continue
 
                 extraPhones = fileResults["extraPhones"]
                 missingPhones = fileResults["missingPhones"]
                 startDiffs = fileResults["startDiffs"]
                 endDiffs = fileResults["endDiffs"]
                 replacementCounts = fileResults["replacementCounts"]
+                containsOOV = fileResults["containsOOV"]
 
-                # Roughly speaking, if we have more problems than matches, Gentle or our
-                # comparison didn't really work for this sentence.
-                numExtraPhones = sum(extraPhones.values())
-                numMissingPhones = sum(missingPhones.values())
-                numMatchingPhones = sum(len(l) for l in endDiffs.values())
-                failedSentence = numExtraPhones + numMissingPhones > numMatchingPhones
-                if failedSentence:
-                    numSentencesExcluded += 1
-                    continue
+                # # Exclude sentences if
+                # # - there was an "out-of-vocabulary" word
+                # # - the phone matching process had more problems than matches
+                # numExtraPhones = sum(extraPhones.values())
+                # numMissingPhones = sum(missingPhones.values())
+                # numMatchingPhones = sum(len(l) for l in endDiffs.values())
+                # tooManyProblems = numExtraPhones + numMissingPhones > numMatchingPhones
+                # skipSentence = containsOOV or tooManyProblems
+                # if skipSentence:
+                #     numSentencesExcluded += 1
+                #     continue
 
                 # Otherwise, include the results from this sentence in our aggregates.
                 numSentencesIncluded += 1
@@ -93,7 +105,6 @@ def createReportComparingTimitAndGentle(timitDirpath):
     ## Visuals
     #####
 
-    reportsDir = "./comparisonReports"
     try:
         os.makedirs(reportsDir)
     except FileExistsError:
@@ -329,7 +340,7 @@ def createReportComparingTimitAndGentle(timitDirpath):
     plt.savefig(f"{reportsDir}/summaryTable.png", bbox_inches="tight")
     plt.close(summaryTableFig)
 
-    ## Table of which phones in TIMIT matched each phone in Gentle how many times
+    ## Table of which phones in Other matched each phone in Gentle how many times
     ## ("Replacements Table").
     figureIdx += 1
     replacementsTableFig = plt.figure(figureIdx)
@@ -337,8 +348,8 @@ def createReportComparingTimitAndGentle(timitDirpath):
     # Each row of the table will represent a symbol.
     rowLabels = sorted(allSymbols)
     # Each column of the table will represent a symbol (how many times that symbol in
-    # TIMIT was found as a match for a phone in Gentle), except the last column: total
-    # times a particular phone in Gentle was successfully matched to phones in TIMIT.
+    # Other was found as a match for a phone in Gentle), except the last column: total
+    # times a particular phone in Gentle was successfully matched to phones in Other.
     rowLabelOnRightCol = ""
     colLabels = sorted(allSymbols) + [rowLabelOnRightCol]
     # Create the inputs to matplotlib's `table`.
@@ -353,7 +364,7 @@ def createReportComparingTimitAndGentle(timitDirpath):
         numMatched = len(startDiffs)
 
         for tSymbol in sorted(allSymbols):
-            # Add the number (and percent) of times the TIMIT phone was found as a match
+            # Add the number (and percent) of times the Other phone was found as a match
             # for the Gentle phone.
             cellValue = allReplacementCountsByPhone[gSymbol][tSymbol]
             cellPercent = round((cellValue / numMatched) * 100) if numMatched > 0 else 0
@@ -412,7 +423,10 @@ def createReportComparingTimitAndGentle(timitDirpath):
     startDiffsByPhoneLengthData = list(
         zip(startDiffsByPhoneLengthX, startDiffsByPhoneLengthY)
     )
-    startDiffsByPhoneLengthSparse = random.sample(startDiffsByPhoneLengthData, 500)
+
+    startDiffsByPhoneLengthSparse = random.sample(
+        startDiffsByPhoneLengthData, min(500, len(startDiffsByPhoneLengthData))
+    )
     startDiffsByPhoneLengthX, startDiffsByPhoneLengthY = zip(
         *startDiffsByPhoneLengthSparse
     )
@@ -446,7 +460,9 @@ def createReportComparingTimitAndGentle(timitDirpath):
     endDiffsByPhoneLengthData = list(
         zip(endDiffsByPhoneLengthX, endDiffsByPhoneLengthY)
     )
-    endDiffsByPhoneLengthSparse = random.sample(endDiffsByPhoneLengthData, 500)
+    endDiffsByPhoneLengthSparse = random.sample(
+        endDiffsByPhoneLengthData, min(500, len(endDiffsByPhoneLengthData))
+    )
     endDiffsByPhoneLengthX, endDiffsByPhoneLengthY = zip(*endDiffsByPhoneLengthSparse)
     endDiffsByPhoneLengthAxes.scatter(
         endDiffsByPhoneLengthX, endDiffsByPhoneLengthY, s=1
@@ -461,20 +477,21 @@ def createReportComparingTimitAndGentle(timitDirpath):
 
     ## Text file of misc info.
     with open(f"{reportsDir}/miscInfo.txt", "wt") as f:
-        f.write(f"TIMIT recordings included: {numSentencesIncluded}\n")
-        f.write(f"TIMIT recordings excluded: {numSentencesExcluded}\n")
+        f.write(f"Recordings included: {numSentencesIncluded}\n")
+        f.write(f"Recordings excluded: {numSentencesExcluded}\n")
 
 
-def compareTimitAndGentleTextGridTiers(filepath):
-    """For a TextGrid file with a tier for Gentle timings and a tier for TIMIT timings,
-    find nearby matches between the phones in each tier and get the differences in start
-    and end timings.
+class TextGridException(Exception):
+    pass
 
-    Found lists of TIMIT's phones and quirks and such in TIMIT's documentation,
-    especially `PHONCODE.doc`.
+
+def compareGentleAndOtherTextGridTiers(filepath):
+    """For a TextGrid file with a tier for Gentle timings and a tier for Other timings
+    (such as TIMIT), find nearby matches between the phones in each tier and get the
+    differences in start and end timings.
 
     :param str filepath: Absolute or relative path to a .textGrid file. The TextGrid
-        file should have a tier for Gentle timings and for TIMIT timings.
+        file should have a tier for Gentle timings and for Other timings.
 
     :return dict results: Dict with the following keys:
         - extraPhones: Counter, mapping a string key (the phone) to an int (how many
@@ -482,24 +499,37 @@ def compareTimitAndGentleTextGridTiers(filepath):
         - missingPhones: Counter, mapping a string key (the phone) to an int (how many
             times it was missing)
         - startDiffs: dict, mapping a string key (the phone) to a list of dicts with
-            keys "phoneLength" (phone length, in seconds) and "diff" (start time diff
-            between Gentle and TIMIT, in seconds). Each dict represents a single
-            instance of a phone in Gentle.
-        - endDiffs: dict, mapping a string key (the phone) to a list of dicts with
-            keys "phoneLength" (phone length, in seconds) and "diff" (end time diff
-            between Gentle and TIMIT, in seconds). Each dict represents a single
-            instance of a phone in Gentle.
+            keys
+            - "diff" (start time diff between Gentle and Other, in seconds)
+            - "phoneLength" (phone length, in seconds)
+            ## TODO: could add more fields here to slice and dice afterward, maybe even
+            ##  throw into a SQL db for flexible querying (maybe something besides a SQL
+            ##  db if there's something even more convenient for quickly making charts
+            ##  of various slices)
+            - "isFirstPhone"
+            - "isLastPhone"
+            - "isVowel"
+            Each dict represents a single instance of a phone in Gentle.
+        - endDiffs: dict, same as `startDiffs` but for the end timings of phones
         - replacementCounts: dict, mapping a string key (the phone in Gentle) to a
-            Counter mapping a string key (the phone in TIMIT) to how many times the
-            phone in TIMIT was matched to the phone in Gentle
+            Counter mapping a string key (the phone in Other) to how many times the
+            phone in Other was matched to the phone in Gentle
+        - containsOOV: bool, whether or not there was a word "out-of-vocabulary" for
+            Gentle and thus the matching of phones between Gentle and Other is more
+            likely to get messed up.
     """
+    try:
+        textGrid = parseTextGrid.TextGrid.load(filepath)
+    except IndexError:
+        print(
+            f"Couldn't parse TextGrid file: {filepath}. Probably no phones in a tier."
+        )
+        raise TextGridException
 
-    textGrid = TextGrid.load(filepath)
-
-    # Some phones in Gentle will be either replaced or split into multiple in TIMIT.
+    # Some phones in Gentle will be either replaced or split into multiple in Other.
     # This dict maps some phones to potential replacements or additions that should
     # still be considered as "matching". For example, closure intervals of stops are
-    # distinguised from the stop release in TIMIT, so if looking for "t" and we find
+    # distinguised from the stop release in Other, so if looking for "t" and we find
     # "tcl" and then "t", we effectively combine them.
     VALID_SYMBOL_REPLACEMENTS = defaultdict(
         set,
@@ -564,28 +594,86 @@ def compareTimitAndGentleTextGridTiers(filepath):
         "ax-h",
     }
 
+    # Symbols in the International Phonetic Alphabet mapped to their corresponding
+    # 2-symbol representations in ARPABET.
+    IPA_TO_ARPABET_MAP = {
+        "ɑ": "aa",
+        "æ": "ae",
+        "ʌ": "ah",
+        "ɔ": "ai",
+        "aʊ": "aw",
+        "ə": "ax",
+        "ɚ": "axr",
+        "aɪ": "ay",
+        "ɛ": "eh",
+        "ɝ": "er",
+        "eɪ": "ey",
+        "ɪ": "ih",
+        "ɨ": "ix",
+        "i": "iy",
+        "oʊ": "ow",
+        "ɔɪ": "oy",
+        "ʊ": "uh",
+        "u": "uw",
+        "ʉ": "ux",
+        "b": "b",
+        "tʃ": "ch",
+        "d": "d",
+        "ð": "dh",
+        "ɾ": "dx",
+        "l̩": "el",
+        "m̩": "em",
+        "n̩": "en",
+        "f": "f",
+        "ɡ": "g",
+        "h": "hh",
+        "dʒ": "jh",
+        "k": "k",
+        "l": "l",
+        "m": "m",
+        "n": "n",
+        "ŋ": "ng",
+        "ɾ̃": "nx",
+        "p": "p",
+        "ʔ": "q",
+        "ɹ": "r",
+        "s": "s",
+        "ʃ": "sh",
+        "t": "t",
+        "θ": "th",
+        "v": "v",
+        "w": "w",
+        "ʍ": "wh",
+        "j": "y",
+        "z": "z",
+        "ʒ": "zh",
+    }
+
     # Symbols which, if found while not looking for them, may be ignored without being
     # considered "extra".
-    MAY_IGNORE_FROM_TIMIT = {
+    MAY_IGNORE_FROM_OTHER = {
+        # TIMIT
         "pau",  # pause
         "epi",  # epenthetic silence
         "h#",  # begin/end marker (non-speech events)
+        # Sergey
+        "",
     }
 
-    # For a given Gentle phone, as we scan through TIMIT phones trying to match to it,
-    # don't consider any TIMIT phones this many seconds away from the Gentle phone.
+    # For a given Gentle phone, as we scan through Other phones trying to match to it,
+    # don't consider any Other phones this many seconds away from the Gentle phone.
     MAX_DIFF_sec = 0.1
 
-    # Assign the tiers to either TIMIT or Gentle.
-    timitTier = None
+    # Assign the tiers to either Gentle or Other.
+    otherTier = None
     gentleTier = None
     for tier in textGrid:
-        if "timit" in tier.nameid.lower():
-            timitTier = tier
-        elif "gentle" in tier.nameid.lower():
+        if "gentle" in tier.nameid.lower():
             gentleTier = tier
-    if timitTier is None or gentleTier is None:
-        raise Exception("TextGrid must have tiers for TIMIT and Gentle timings.")
+        else:
+            otherTier = tier
+    if otherTier is None or gentleTier is None:
+        raise Exception("TextGrid must have tiers for Gentle and Other timings.")
 
     # Initialize vars to keep track of results.
     extraPhones = Counter()
@@ -593,90 +681,103 @@ def compareTimitAndGentleTextGridTiers(filepath):
     startDiffs = defaultdict(list)
     endDiffs = defaultdict(list)
     replacementCounts = defaultdict(Counter)
+    containsOOV = False
 
     ## ALGORITHM
-    ## - Keep track of the latest phone in the TIMIT phones which has been matched to a
+    ## - Keep track of the latest phone in the Other phones which has been matched to a
     ##      Gentle phone.
     ## - Start iterating through Gentle phones.
-    ## - For each Gentle phone, start with the latest matched TIMIT phone (so sometimes
-    ##      a TIMIT phone could match to multiple Gentle phones) and iterate through the
-    ##      TIMIT phones until they start (and subsequently stop) matching the current
-    ##      Gentle phone. Keep track of the start/end timings before moving on to the
-    ##      next Gentle phone.
+    ## - For each Gentle phone, start with the latest matched Other phone (so sometimes
+    ##      an Other phone could match to multiple Gentle phones) and iterate through
+    ##      the Other phones until they start (and subsequently stop) matching the
+    ##      current Gentle phone. Keep track of the start/end timings before moving on
+    ##      to the next Gentle phone.
     ## - During this, also keep track of Gentle phones not successfully matched
-    ##      ("missing") and TIMIT phones not successfully matched ("extra").
+    ##      ("missing") and Other phones not successfully matched ("extra").
 
-    # The index of the last TIMIT phone which has been matched to a Gentle phone.
-    lastTimitIdxMatched = 0
+    # The index of the last Other phone which has been matched to a Gentle phone.
+    lastOtherIdxMatched = 0
+
+    numGentlePhones = len(gentleTier.simple_transcript)
 
     # Iterate through Gentle phones.
-    for gPhoneStart, gPhoneEnd, gPhoneSymbol in gentleTier.simple_transcript:
+    for gIdx, (gPhoneStart, gPhoneEnd, gPhoneSymbol) in enumerate(
+        gentleTier.simple_transcript
+    ):
         gPhoneStart, gPhoneEnd = float(gPhoneStart), float(gPhoneEnd)
         gPhoneLength = gPhoneEnd - gPhoneStart
         # Gentle symbols are like "t_B", "t_I", or "t_E", where all we need is the "t".
         gPhoneSymbol = gPhoneSymbol.split("_")[0]
 
-        # Starting with the last TIMIT phone that matched the previous Gentle phone
-        # (possible for a TIMIT phone to match multiple Gentle phones), iterate through
-        # TIMIT phones until we start (and subsequently stop) matching the current
+        # Note if we find an "out-of-vocabulary" symbol in Gentle's labeling.
+        if gPhoneSymbol == "oov":
+            containsOOV = True
+
+        # Starting with the last Other phone that matched the previous Gentle phone
+        # (possible for an Other phone to match multiple Gentle phones), iterate through
+        # Other phones until we start (and subsequently stop) matching the current
         # Gentle phone.
-        tPhoneIdx = lastTimitIdxMatched
+        oPhoneIdx = lastOtherIdxMatched
         hasStartedMatching = False
         lastMatchingPhoneEnd = None
-        while tPhoneIdx < len(timitTier.simple_transcript):
-            tPhoneStart, tPhoneEnd, tPhoneSymbol = timitTier.simple_transcript[
-                tPhoneIdx
+        while oPhoneIdx < len(otherTier.simple_transcript):
+            oPhoneStart, oPhoneEnd, oPhoneSymbol = otherTier.simple_transcript[
+                oPhoneIdx
             ]
-            tPhoneStart, tPhoneEnd = float(tPhoneStart), float(tPhoneEnd)
+            oPhoneStart, oPhoneEnd = float(oPhoneStart), float(oPhoneEnd)
+            # If the labeling used an IPA symbol, map it to ARPABET for consistency with
+            # Gentle.
+            if oPhoneSymbol in IPA_TO_ARPABET_MAP:
+                oPhoneSymbol = IPA_TO_ARPABET_MAP[oPhoneSymbol]
 
-            # If the current TIMIT phone's timing is too far before the Gentle phone's
+            # If the current Other phone's timing is too far before the Gentle phone's
             # timing,
-            if tPhoneEnd < gPhoneStart - MAX_DIFF_sec:
-                # Move on to the next TIMIT phone immediately.
-                tPhoneIdx += 1
+            if oPhoneEnd < gPhoneStart - MAX_DIFF_sec:
+                # Move on to the next Other phone immediately.
+                oPhoneIdx += 1
                 continue
 
             # If we get too far past the Gentle phone's timing without finding a
-            # matching TIMIT phone yet,
-            if tPhoneStart > gPhoneEnd + MAX_DIFF_sec and not hasStartedMatching:
+            # matching Other phone yet,
+            if oPhoneStart > gPhoneEnd + MAX_DIFF_sec and not hasStartedMatching:
                 # Move on to the next Gentle phone.
                 break
 
-            # Check if the current TIMIT phone matches the current Gentle phone (or any
+            # Check if the current Other phone matches the current Gentle phone (or any
             # symbols that we consider valid replacements for this Gentle phone).
             matchingSymbols = {gPhoneSymbol}
             matchingSymbols = matchingSymbols | VALID_SYMBOL_REPLACEMENTS[gPhoneSymbol]
-            isMatch = tPhoneSymbol in matchingSymbols
+            isMatch = oPhoneSymbol in matchingSymbols
 
-            # If TIMIT's phone matches,
+            # If Other's phone matches,
             if isMatch:
-                # Save the TIMIT phone end time in case this TIMIT phone ends up being
-                # the end of TIMIT's matching of the current Gentle phone.
-                lastMatchingPhoneEnd = tPhoneEnd
-                # If this is the first TIMIT phone to match the current Gentle phone,
+                # Save the Other phone end time in case this Other phone ends up being
+                # the end of Other's matching of the current Gentle phone.
+                lastMatchingPhoneEnd = oPhoneEnd
+                # If this is the first Other phone to match the current Gentle phone,
                 if not hasStartedMatching:
-                    # Mark down that TIMIT started matching the current Gentle phone.
+                    # Mark down that Other started matching the current Gentle phone.
                     hasStartedMatching = True
-                    # Keep track of the start time diff between Gentle and TIMIT.
-                    startDiff = gPhoneStart - tPhoneStart
+                    # Keep track of the start time diff between Gentle and Other.
+                    startDiff = gPhoneStart - oPhoneStart
                     startDiffs[gPhoneSymbol].append(
                         {"diff": startDiff, "phoneLength": gPhoneLength}
                     )
-                    # Add the TIMIT phones between the previous match and this match to
+                    # Add the Other phones between the previous match and this match to
                     # the counts of extra phones.
-                    for idx in range(lastTimitIdxMatched + 1, tPhoneIdx):
-                        symbol = timitTier.simple_transcript[idx][2]
-                        if symbol not in MAY_IGNORE_FROM_TIMIT:
+                    for idx in range(lastOtherIdxMatched + 1, oPhoneIdx):
+                        symbol = otherTier.simple_transcript[idx][2]
+                        if symbol not in MAY_IGNORE_FROM_OTHER:
                             extraPhones[symbol] += 1
-                # Update our count of how many times the current TIMIT phone's symbol
+                # Update our count of how many times the current Other phone's symbol
                 # has been matched to the current Gentle phone's symbol.
-                replacementCounts[gPhoneSymbol][tPhoneSymbol] += 1
-                # Update our index of the last TIMIT phone that has been matched to a
+                replacementCounts[gPhoneSymbol][oPhoneSymbol] += 1
+                # Update our index of the last Other phone that has been matched to a
                 # Gentle phone.
-                lastTimitIdxMatched = tPhoneIdx
+                lastOtherIdxMatched = oPhoneIdx
 
-            # If TIMIT's phone does not match but we had already started matching the
-            # current Gentle phone (indicating this is the end of TIMIT's matching of
+            # If Other's phone does not match but we had already started matching the
+            # current Gentle phone (indicating this is the end of Other's matching of
             # the current Gentle phone),
             if not isMatch and hasStartedMatching:
                 # Keep track of the end time diff.
@@ -687,19 +788,19 @@ def compareTimitAndGentleTextGridTiers(filepath):
                 # Move on to the next Gentle phone.
                 break
 
-            # Move to the next TIMIT phone.
-            tPhoneIdx += 1
+            # Move to the next Other phone.
+            oPhoneIdx += 1
 
-        # Once we've ended (or broke out of) the loop, if TIMIT has not started matching
+        # Once we've ended (or broke out of) the loop, if Other has not started matching
         # the current Gentle phone, mark down that this Gentle phone was missing.
         if not hasStartedMatching:
             missingPhones[gPhoneSymbol] += 1
 
     # Once we've gotten through the Gentle phones, make sure any unmatched trailing
-    # TIMIT phones are marked down as being extra.
-    for idx in range(lastTimitIdxMatched + 1, len(timitTier.simple_transcript)):
-        symbol = timitTier.simple_transcript[idx][2]
-        if symbol not in MAY_IGNORE_FROM_TIMIT:
+    # Other phones are marked down as being extra.
+    for idx in range(lastOtherIdxMatched + 1, len(otherTier.simple_transcript)):
+        symbol = otherTier.simple_transcript[idx][2]
+        if symbol not in MAY_IGNORE_FROM_OTHER:
             extraPhones[symbol] += 1
 
     return {
@@ -708,6 +809,7 @@ def compareTimitAndGentleTextGridTiers(filepath):
         "startDiffs": startDiffs,
         "endDiffs": endDiffs,
         "replacementCounts": replacementCounts,
+        "containsOOV": containsOOV,
     }
 
 
@@ -731,6 +833,8 @@ def getRepresentativeColor(
         color we give the passed in `value`.
     """
     proportionFromStart = (value - startValue) / (endValue - startValue)
+    proportionFromStart = max(0, proportionFromStart)
+    proportionFromStart = min(1, proportionFromStart)
     color = tuple(
         startRGBVal + (proportionFromStart * (endRGBVal - startRGBVal))
         for startRGBVal, endRGBVal in zip(startColor, endColor)
@@ -763,16 +867,16 @@ def convertTimitPhnAndGentleJsonToTextGrid(inputDir, filename):
     Gentle
     =====
 
-    The gentle tool outputs a json file whose format is best observed by running the
-    gentle tool on an audio file and looking at the resulting json file. (The format is
+    The Gentle tool outputs a json file whose format is best observed by running the
+    Gentle tool on an audio file and looking at the resulting json file. (The format is
     from a gentle.Transcription object's .to_json() function.)
 
     -----
 
     :path str inputDir: Absolute or relative path to a directory containing TIMIT data
-        and gentle result data, with matching names (see the `filename` parameter).
+        and Gentle result data, with matching names (see the `filename` parameter).
     :path str filename: Part of the filename which is common across the audio file,
-        TIMIT phone timings file, and gentle phone timings file, e.g. "SA1" (which is in
+        TIMIT phone timings file, and Gentle phone timings file, e.g. "SA1" (which is in
         SA1.wav, SA1.PHN, and SA1_gentlePhoneTimings.json)
 
     No return value. Instead, a new file, named the same as the input file but with a
@@ -781,12 +885,11 @@ def convertTimitPhnAndGentleJsonToTextGrid(inputDir, filename):
     """
 
     # Phone timings from TIMIT dataset that we are converting to a .textGrid file.
-    TIMIT_WAV_SAMPLE_RATE = 16000
     timitPhnFilepath = os.path.join(inputDir, f"{filename}.PHN")
     with open(timitPhnFilepath, "r") as f:
         timitPhoneTimings = f.readlines()
 
-    # Phone timings from gentle that we are converting to a .textGrid file.
+    # Phone timings from Gentle that we are converting to a .textGrid file.
     gentleJsonFilepath = os.path.join(inputDir, f"{filename}_gentlePhoneTimings.json")
     with open(gentleJsonFilepath, "r") as f:
         gentleResult = json.load(f)
@@ -801,6 +904,7 @@ def convertTimitPhnAndGentleJsonToTextGrid(inputDir, filename):
 
     # Once-per-file data.
 
+    TIMIT_WAV_SAMPLE_RATE = 16000
     timitTotalTimeLength = int(timitPhoneTimings[-1].split()[1]) / TIMIT_WAV_SAMPLE_RATE
     gentleTotalTimeLength = max(word.get("end", 0) for word in gentleResult["words"])
     totalTimeLength = max(timitTotalTimeLength, gentleTotalTimeLength)
@@ -808,7 +912,7 @@ def convertTimitPhnAndGentleJsonToTextGrid(inputDir, filename):
     outputStrIO.write("xmin = 0\n")
     outputStrIO.write(f"xmax = {totalTimeLength}\n")
     outputStrIO.write("tiers? <exists>\n")
-    outputStrIO.write(f"size = 2\n")
+    outputStrIO.write("size = 2\n")
     outputStrIO.write("item []:\n")
 
     # TIMIT tier: header data.
@@ -917,7 +1021,7 @@ def convertTimitPhnToTextGrid(filepath):
     outputStrIO.write("xmin = 0\n")
     outputStrIO.write(f"xmax = {totalTimeLength}\n")
     outputStrIO.write("tiers? <exists>\n")
-    outputStrIO.write(f"size = 1\n")
+    outputStrIO.write("size = 1\n")
     outputStrIO.write("item []:\n")
     outputStrIO.write("    item [1]:\n")
     outputStrIO.write('        class = "IntervalTier"\n')
@@ -946,19 +1050,19 @@ def convertTimitPhnToTextGrid(filepath):
 
 
 def convertGentleJsonToTextGrid(filepath):
-    """The gentle tool outputs a json file whose format is best observed by running the
-    gentle tool on an audio file and looking at the resulting json file. (The format is
+    """The Gentle tool outputs a json file whose format is best observed by running the
+    Gentle tool on an audio file and looking at the resulting json file. (The format is
     from a gentle.Transcription object's .to_json() function.)
     This conversion function reads the json file specified and outputs a .textGrid file,
     whose format is described here:
     https://www.fon.hum.uva.nl/praat/manual/TextGrid_file_formats.html.
 
-    :path str filepath: Absolute or relative path to a file output by gentle to json.
+    :path str filepath: Absolute or relative path to a file output by Gentle to json.
 
     No return value. Instead, a new file, named the same as the input file but with a
     .textGrid file extension, is created on disk.
     """
-    # Phone timings from gentle that we are converting to a .textGrid file.
+    # Phone timings from Gentle that we are converting to a .textGrid file.
     with open(filepath, "r") as f:
         gentleResult = json.load(f)
 
@@ -978,7 +1082,7 @@ def convertGentleJsonToTextGrid(filepath):
     outputStrIO.write("xmin = 0\n")
     outputStrIO.write(f"xmax = {totalTimeLength}\n")
     outputStrIO.write("tiers? <exists>\n")
-    outputStrIO.write(f"size = 1\n")
+    outputStrIO.write("size = 1\n")
     outputStrIO.write("item []:\n")
     outputStrIO.write("    item [1]:\n")
     outputStrIO.write('        class = "IntervalTier"\n')
@@ -1098,6 +1202,216 @@ def createTextGridsFromTimitPhnAndGentleJsonForAllTimit(timitDirpath):
             if filename.endswith("_gentlePhoneTimings.json"):
                 filenameBase = filename.split("_gentlePhoneTimings.json")[0]
                 convertTimitPhnAndGentleJsonToTextGrid(path, filenameBase)
+
+
+def createDirOfWavAndTxtAndSergeyTextgrids(sergeyDataDirpath):
+    """Take a folder of Sergey's collected + hand-segmented T5/T11 data, and organize
+    files to be passed to our Gentle script.
+
+    :param str sergeyDataDirpath: Path to root of directory structure to find the T5/T11
+        data (both the phone hand-segmented phone timings in .textGrid files, and the
+        recorded .wav files).
+
+    No return value. Instead, for each dir in the specified root dir, create a new dir
+        inside it that contains all the recorded .wav files, new .txt transcript files,
+        and hand-segmented phone timing .textGrid files. One of each of those types of
+        files for each recording .wav file, named correspondingly.
+    """
+    for sessionDirname in os.listdir(sergeyDataDirpath):
+        sessionDirpath = os.path.join(sergeyDataDirpath, sessionDirname)
+
+        if not os.path.isdir(sessionDirpath):
+            continue
+
+        wavFilesDirpath = os.path.join(sessionDirpath, "wav_files")
+        textGridFilesDirpath = os.path.join(sessionDirpath, "textGrid_files")
+        # Add a new folder next to the existing ones, where we'll organize all the files
+        # so it's easy for our Gentle script.
+        combinedFilesDirpath = os.path.join(sessionDirpath, "combined_files")
+        try:
+            os.mkdir(combinedFilesDirpath)
+        except OSError:
+            pass
+
+        for blockDirname in os.listdir(wavFilesDirpath):
+            blockDirpath = os.path.join(wavFilesDirpath, blockDirname)
+
+            if not os.path.isdir(blockDirpath):
+                continue
+
+            for wavFilename in os.listdir(blockDirpath):
+                # Ignore non-audio files.
+                if not wavFilename.endswith(".wav"):
+                    continue
+
+                # `filename` has no path, no extension.
+                filename = Path(wavFilename).stem
+                # The Sergey hand-segmented .TextGrid file uses "_" where there are "."
+                # in the .wav filename. Let's use that as the base filename in the new
+                # `combined_files/` directory.
+                filename = filename.replace(".", "_")
+
+                wavFilepath = os.path.join(blockDirpath, wavFilename)
+                newWavFilename = f"{filename}.wav"
+                newWavFilepath = os.path.join(combinedFilesDirpath, newWavFilename)
+                shutil.copy(wavFilepath, newWavFilepath)
+
+                # The Sergey hand-segmented .TextGrid file uses "_" where there are "."
+                # in the .wav filename.
+                textGridFilename = f"{filename}.TextGrid"
+                textGridFilepath = os.path.join(textGridFilesDirpath, textGridFilename)
+                if not os.path.exists(textGridFilepath):
+                    print(
+                        f"Could not find corresponding .TextGrid file for "
+                        f"{wavFilepath} at {textGridFilepath}"
+                    )
+                newTextGridFilename = f"{filename}_sergeyPhoneTimings.textGrid"
+                newTextGridFilepath = os.path.join(
+                    combinedFilesDirpath, newTextGridFilename
+                )
+                shutil.copy(textGridFilepath, newTextGridFilepath)
+
+                newTxtFilename = f"{filename}.txt"
+                newTxtFilepath = os.path.join(combinedFilesDirpath, newTxtFilename)
+                # The word spoken in the recording is at the end of the filename.
+                word = filename.split("_")[-1]
+                # Write just the spoken word to the transcript .txt file.
+                with open(newTxtFilepath, "w") as f:
+                    f.write(f"{word}\n")
+
+
+def convertSergeyTextgridAndGentleJsonToTextGrid(inputDir, filename):
+    """Take Gentle and Sergey's hand-done phone timings, and create a .textGrid file so
+    they may be compared to each other in Praat.
+
+    Sergey
+    =====
+
+    Sergey's hand-done phone timings are already in TextGrid format, the same as this
+    function outputs.
+
+    Gentle
+    =====
+
+    The Gentle tool outputs a json file whose format is best observed by running the
+    Gentle tool on an audio file and looking at the resulting json file. (The format is
+    from a gentle.Transcription object's .to_json() function.)
+
+    -----
+
+    :path str inputDir: Absolute or relative path to a directory containing Sergey's
+        hand-done data and Gentle result data, with matching names (see the `filename`
+        parameter).
+    :path str filename: Part of the filename which is common across the audio file,
+        Sergey's hand-done phone timings file, and Gentle phone timings file, e.g.
+        "R_t5_2019_01_23_B1_trial0001_fawn" (which is in
+        R_t5_2019_01_23_B1_trial0001_fawn.wav,
+        R_t5_2019_01_23_B1_trial0001_fawn_sergeyPhoneTimings.textGrid, and
+        R_t5_2019_01_23_B1_trial0001_fawn_gentlePhoneTimings.json)
+
+    No return value. Instead, a new file, named the same as the input file but with a
+    .textGrid file extension, is created on disk. .textGrid format described here:
+    https://www.fon.hum.uva.nl/praat/manual/TextGrid_file_formats.html.
+    """
+
+    # Phone timings from Sergey's hand-done dataset.
+    sergeyTextgridFilepath = os.path.join(
+        inputDir, f"{filename}_sergeyPhoneTimings.textGrid"
+    )
+    try:
+        with open(sergeyTextgridFilepath, "r", encoding="utf-8") as f:
+            sergeyTextgridLines = f.readlines()
+    except UnicodeDecodeError:
+        with open(sergeyTextgridFilepath, "r", encoding="utf-16") as f:
+            sergeyTextgridLines = f.readlines()
+
+    # Phone timings from Gentle that we are converting to a .textGrid file.
+    gentleJsonFilepath = os.path.join(inputDir, f"{filename}_gentlePhoneTimings.json")
+    with open(gentleJsonFilepath, "r") as f:
+        gentleResult = json.load(f)
+
+    # To build up contents of new .textGrid file
+    outputStrIO = StringIO()
+
+    # For the once-per-file stuff and the first tier (Sergey's hand-done tier), mostly
+    # copy Sergey's .textGrid file, except replace a few parts:
+    # - xmax should be the max of Sergey's and Gentle's xmax values.
+    # - size should be 2 (2 tiers, Sergey's and Gentle's) instead of 1
+    # - name of Sergey's tier should be more than just "phones" since there's 2 tiers
+    for line in sergeyTextgridLines:
+        if line.startswith("xmax ="):
+            sergeyTotalTimeLength = float(line.split()[2])
+            gentleTotalTimeLength = max(
+                word.get("end", 0) for word in gentleResult["words"]
+            )
+            totalTimeLength = max(sergeyTotalTimeLength, gentleTotalTimeLength)
+            outputStrIO.write(f"xmax = {totalTimeLength}\n")
+        elif line.startswith("size ="):
+            outputStrIO.write("size = 2\n")
+        elif line.startswith("        name ="):
+            outputStrIO.write('        name = "Sergey hand-done phones"\n')
+        else:
+            outputStrIO.write(line)
+
+    # Now do custom stuff for the second tier: Gentle's results.
+
+    # Gentle tier: header data.
+
+    gentleTotalPhones = sum(
+        len(word.get("phones", [])) for word in gentleResult["words"]
+    )
+
+    outputStrIO.write("    item [2]:\n")
+    outputStrIO.write('        class = "IntervalTier"\n')
+    outputStrIO.write('        name = "Gentle phones"\n')
+    outputStrIO.write("        xmin = 0\n")
+    outputStrIO.write(f"        xmax = {gentleTotalTimeLength}\n")
+    outputStrIO.write(f"        intervals: size = {gentleTotalPhones}\n")
+
+    # Gentle tier: Once-per-phone data.
+
+    phoneIdx = 1
+    for wordObj in gentleResult["words"]:
+        if wordObj["case"] != "success":
+            continue
+        phoneStart = wordObj["start"]
+        for phoneObj in wordObj["phones"]:
+            phoneSymbol = phoneObj["phone"]
+            phoneDuraction = phoneObj["duration"]
+            phoneEnd = phoneStart + phoneDuraction
+
+            outputStrIO.write(f"        intervals [{phoneIdx}]:\n")
+            outputStrIO.write(f"            xmin = {phoneStart}\n")
+            outputStrIO.write(f"            xmax = {phoneEnd}\n")
+            outputStrIO.write(f'            text = "{phoneSymbol}"\n')
+
+            # Update loop variables for the next phone.
+            phoneStart = phoneEnd
+            phoneIdx += 1
+
+    # Write to the output .textGrid file.
+    outputFilepath = os.path.join(inputDir, f"{filename}.textGrid")
+    with open(outputFilepath, "w+") as f:
+        outputStrIO.seek(0)
+        shutil.copyfileobj(outputStrIO, f)
+
+
+def createTextGridsFromSergeyTextGridAndGentleJsonForWholeDir(inputDir):
+    """Go through the folder of Sergey+Gentle data and create .textGrid files which have
+    a tier for both Gentle and Sergey's hand-done segmentation, so they may be compared
+    in Praat (or programatically).
+
+    :param str inputDir: Path to the directory with all the phone timings files to make
+        .textGrid files from.
+
+    No return value. Instead, create a bunch of .textGrid files on disk in the same
+        folders that the audio and transcript files are found in.
+    """
+    for path, dirs, files in os.walk(inputDir):
+        for filename in files:
+            if filename.endswith("_gentlePhoneTimings.json"):
+                filenameBase = filename.split("_gentlePhoneTimings.json")[0]
+                convertSergeyTextgridAndGentleJsonToTextGrid(path, filenameBase)
 
 
 if __name__ == "__main__":

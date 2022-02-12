@@ -44,7 +44,7 @@ def main():
         "--file",
         dest="file",
         type=str,
-        help="path to single audio file to segment instead of the whole directory",
+        help="single audio file to segment instead of the whole directory",
     )
     args = parser.parse_args()
 
@@ -92,6 +92,11 @@ def main():
             continue
 
         ## Use `gentle` to get results.
+
+        outputFileName = txtFilename.replace(".txt", "") + "_gentlePhoneTimings.json"
+        outputFilepath = os.path.join(args.inputDir, outputFileName)
+        if os.path.exists(outputFilepath):
+            continue
 
         try:
             resultJson = phonescribeOneFile(audioFilepath, txtFilepath)
