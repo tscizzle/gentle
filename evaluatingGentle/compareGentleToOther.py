@@ -21,9 +21,9 @@ import parseTextGrid
 
 
 def main():
-    createReportComparingGentleAndOther(
-        "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/Sergey_Dataset"
-    )
+    # p = "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/Sergey_Dataset"
+    p = "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/TIMIT_Dataset"
+    createReportComparingGentleAndOther(p)
 
 
 ########################################################################################
@@ -247,9 +247,9 @@ def createReportComparingGentleAndOther(rootDir, reportsDir="./comparisonReports
         matchedColLabel,
         missingColLabel,
         extraColLabel,
-        # medianStartDiffColLabel,
+        medianStartDiffColLabel,
         medianStartDiffAbsColLabel,
-        # medianEndDiffColLabel,
+        medianEndDiffColLabel,
         medianEndDiffAbsColLabel,
     ]
     coloredCols = {
@@ -554,9 +554,9 @@ def compareGentleAndOtherTextGridTiers(filepath):
             "hh": {"hv"},
             "hv": {"hh"},
             "y": {"jh"},
-            "aa": {"ao"},
-            "ah": {"ax", "ax-h", "uh", "ih", "ix", "el", "en", "em"},
-            "ao": {"aa"},
+            "aa": {"ao", "ah"},
+            "ah": {"aa", "ao", "ax", "ax-h", "uh", "ih", "ix", "el", "en", "em"},
+            "ao": {"aa", "ah"},
             "ih": {"ax", "ax-h", "ix", "iy", "uh", "el"},
             "iy": {"ix"},
             "eh": {"ae", "ih", "el", "axr", "er"},
@@ -600,12 +600,14 @@ def compareGentleAndOtherTextGridTiers(filepath):
         "ɑ": "aa",
         "æ": "ae",
         "ʌ": "ah",
-        "ɔ": "ai",
+        "ɔ": "ao",
+        "ɒ": "ao",
         "aʊ": "aw",
         "ə": "ax",
         "ɚ": "axr",
         "aɪ": "ay",
         "ɛ": "eh",
+        "e": "eh",
         "ɝ": "er",
         "eɪ": "ey",
         "ɪ": "ih",
