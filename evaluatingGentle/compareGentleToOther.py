@@ -1,4 +1,7 @@
+from cmath import isclose
 import os
+import sys
+import math
 from pathlib import Path
 from io import StringIO
 import shutil
@@ -7,6 +10,7 @@ import json
 from collections import defaultdict, Counter
 import statistics
 import random
+import sqlite3
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,18 +20,33 @@ import parseTextGrid
 
 
 ########################################################################################
+#
 # Main method.
+#
 ########################################################################################
 
 
 def main():
-    # p = "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/Sergey_Dataset"
+    # NOTE: In variables, comments, and docstrings, "Other" with a capital "O" refers to
+    # the other data source being compared to Gentle, such as TIMIT, Sergey's labeling,
+    # etc.
+
     p = "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/TIMIT_Dataset"
+    # p = "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/T5SingleWordsSergey_Dataset"
+    # p = "/home/tyler/Documents/ProgrammyStuff/gentle/evaluatingGentle/T5PennTreeBank_Dataset"
     createReportComparingGentleAndOther(p)
+
+    """
+    import code
+
+    code.interact(local=dict(globals(), **locals()))
+    """
 
 
 ########################################################################################
+#
 # Reporting helpers.
+#
 ########################################################################################
 
 
@@ -40,11 +59,440 @@ def createReportComparingGentleAndOther(rootDir, reportsDir="./comparisonReports
     were replaced for others, etc.
 
     :param str rootDir: Path to root of directory structure to traverse and find
-        all the Gentle output and .textGrid files.
+        all the Gentle output (`X_gentlePhoneTimings.json`) and their corresponding
+        `X.textGrid` files.
     :param str reportsDir: Absolute or relative path (relative to where the script is
         run from) to where we want to save the reports (.png's of charts, etc.)
 
     No return value. Instead, save a bunch of files to disk.
+    """
+
+    #####
+    ## Run Comparisons, Collect Data
+    #####
+
+    # Set up db to collect phoneme timing results for all phoneme boundaries.
+
+    dbConn = sqlite3.connect(":memory:")
+    tableCreationQuery = """
+        CREATE TABLE boundary(
+            id INT PRIMARY KEY,
+            other_phoneme_before TEXT,
+            other_phoneme_after TEXT,
+            gentle_has_match BOOLEAN NOT NULL CHECK (gentle_has_match IN (0, 1)) DEFAULT 0,
+            gentle_phoneme_before TEXT,
+            gentle_phoneme_after TEXT,
+            gentle_off_by_sec REAL,
+            filepath TEXT NOT NULL,
+            timestamp DATETIME NOT NULL
+        );
+    """
+    dbConn.execute(tableCreationQuery)
+
+    # Find and iterate through files in the input directory and run the phoneme timing
+    # comparison for each recording.
+    for path, dirs, files in os.walk(rootDir):
+        for filename in files:
+            if filename.endswith("_gentlePhoneTimings.json"):
+                filenameBase = filename.split("_gentlePhoneTimings.json")[0]
+                textGridFilename = f"{filenameBase}.textGrid"
+                textGridFilepath = os.path.join(path, textGridFilename)
+                try:
+                    # Run the comparison for a single recording. This inserts phoneme
+                    # timing results into the db.
+                    compareGentleAndOtherTextGridTiers(textGridFilepath, dbConn)
+                except TextGridException:
+                    continue
+
+    #####
+    ## Query Data, Aggregate Results
+    #####
+
+    #####
+    ## Create Report (Plots, etc.)
+    #####
+
+    try:
+        os.makedirs(reportsDir)
+    except FileExistsError:
+        pass
+
+    figureIdx = 0
+
+    ## Text file of misc info.
+    with open(f"{reportsDir}/miscInfo.txt", "wt") as f:
+        f.write(f"Something: ___\n")
+
+
+class TextGridException(Exception):
+    pass
+
+
+def compareGentleAndOtherTextGridTiers(filepath, dbConn):
+    """For a TextGrid file with a tier for Gentle timings and a tier for Other timings
+    (such as TIMIT), find nearby matches between the boundaries in each tier and get the
+    differences in timings.
+
+    :param str filepath: Absolute or relative path to a .textGrid file. The TextGrid
+        file should have a tier for Gentle timings and for Other timings.
+    :param sqlite3.Connection dbConn: Sqlite connection where a "boundary" table exists.
+
+    No return value. Instead, insert rows into sqlite db with the following structure:
+        Table: "boundary"
+        Columns: "otherPhonemeBefore", "otherPhonemeAfter", "gentleHasMatch",
+            "gentlePhonemeBefore", "gentlePhonemeAfter", "gentleOffBy_sec"
+    """
+    try:
+        textGrid = parseTextGrid.TextGrid.load(filepath)
+    except IndexError:
+        print(
+            f"Couldn't parse TextGrid file: {filepath}. Probably no phones in a tier."
+        )
+        raise TextGridException
+    print(f"\n\nfilepath: {filepath}\n\n")
+
+    # Some phones in Gentle will be either replaced or split into multiple in Other.
+    # This dict maps some phones to potential replacements or additions that should
+    # still be considered as "matching". For example, closure intervals of stops are
+    # distinguised from the stop release in Other, so if looking for "t" and we find
+    # "tcl" and then "t", we effectively combine them.
+    VALID_SYMBOL_REPLACEMENTS = defaultdict(
+        set,
+        {
+            # closure intervals of stops
+            "b": {"bcl"},
+            "d": {"dcl", "dx"},
+            "g": {"gcl"},
+            "p": {"pcl"},
+            "t": {"tcl", "dx", "q"},
+            "k": {"kcl"},
+            "jh": {"dcl", "y"},
+            "ch": {"tcl"},
+            # additional replacements seen
+            "th": {"dh", "t"},
+            "zh": {"jh", "sh"},
+            "z": {"s"},
+            "m": {"em"},
+            "n": {"nx", "en"},
+            "ng": {"n", "nx"},
+            "l": {"el"},
+            "r": {"axr", "er"},
+            "hh": {"hv"},
+            "hv": {"hh"},
+            "y": {"jh"},
+            "aa": {"ao", "ah"},
+            "ah": {"aa", "ao", "ax", "ax-h", "uh", "ih", "ix", "el", "en", "em"},
+            "ao": {"aa", "ah"},
+            "ih": {"ax", "ax-h", "ix", "iy", "uh", "el"},
+            "iy": {"ix"},
+            "eh": {"ae", "ih", "el", "axr", "er"},
+            "ae": {"eh"},
+            "uh": {"ax", "ix", "ux", "axr", "er"},
+            "ow": {"uh"},
+            "oy": {"ao", "ow"},
+            "uw": {"ux"},
+            "er": {"axr", "r"},
+            None: {"h#"},
+        },
+    )
+
+    # Symbols which are vowels (not treating vowels special right now, but possibly
+    # worth it in the future since there is more ambiguity in labeling vowels than in
+    # labeling other phonemes).
+    VOWEL_PHONES = {
+        "iy",
+        "ih",
+        "eh",
+        "ey",
+        "ae",
+        "aa",
+        "aw",
+        "ay",
+        "ah",
+        "ao",
+        "oy",
+        "ow",
+        "uh",
+        "uw",
+        "ux",
+        "er",
+        "ax",
+        "ix",
+        "axr",
+        "ax-h",
+    }
+
+    # Symbols in the International Phonetic Alphabet mapped to their corresponding
+    # 2-symbol representations in ARPABET.
+    IPA_TO_ARPABET_MAP = {
+        "ɑ": "aa",
+        "æ": "ae",
+        "ʌ": "ah",
+        "ɔ": "ao",
+        "ɒ": "ao",
+        "aʊ": "aw",
+        "ə": "ax",
+        "ɚ": "axr",
+        "aɪ": "ay",
+        "ɛ": "eh",
+        "e": "eh",
+        "ɝ": "er",
+        "eɪ": "ey",
+        "ɪ": "ih",
+        "ɨ": "ix",
+        "i": "iy",
+        "oʊ": "ow",
+        "ɔɪ": "oy",
+        "ʊ": "uh",
+        "u": "uw",
+        "ʉ": "ux",
+        "b": "b",
+        "tʃ": "ch",
+        "d": "d",
+        "ð": "dh",
+        "ɾ": "dx",
+        "l̩": "el",
+        "m̩": "em",
+        "n̩": "en",
+        "f": "f",
+        "ɡ": "g",
+        "h": "hh",
+        "dʒ": "jh",
+        "k": "k",
+        "l": "l",
+        "m": "m",
+        "n": "n",
+        "ŋ": "ng",
+        "ɾ̃": "nx",
+        "p": "p",
+        "ʔ": "q",
+        "ɹ": "r",
+        "s": "s",
+        "ʃ": "sh",
+        "t": "t",
+        "θ": "th",
+        "v": "v",
+        "w": "w",
+        "ʍ": "wh",
+        "j": "y",
+        "z": "z",
+        "ʒ": "zh",
+    }
+
+    # Symbols which, if found while not looking for them, may be ignored without being
+    # considered "extra".
+    MAY_IGNORE_FROM_OTHER = {
+        # TIMIT
+        "pau",  # pause
+        "epi",  # epenthetic silence
+        "h#",  # begin/end marker (non-speech events)
+        # Sergey
+        "",
+    }
+
+    # Assign the tiers to either Gentle or Other.
+    otherTier = None
+    gentleTier = None
+    for tier in textGrid:
+        if "gentle" in tier.nameid.lower():
+            gentleTier = tier
+        else:
+            otherTier = tier
+    if otherTier is None or gentleTier is None:
+        raise Exception("TextGrid must have tiers for Gentle and Other timings.")
+
+    # A TextGrid tier's simple_transcript is a list of tuples of the format
+    # (startTime, endTime, phonemeSymbol).
+    numPhonemes = len(otherTier.simple_transcript)
+    # For boundaries, we include the start of the first phoneme and the end of the last
+    # phoneme, so there's 1 more boundary than phoneme.
+    numBoundaries = numPhonemes + 1
+
+    # Loop through Other's phoneme boundaries.
+    for boundaryIdx in range(numBoundaries):
+
+        # Get the timing of the boundary, and which phonemes come before and after.
+        # "o" at the start of variables stands of "Other", as in TIMIT (as opposed to
+        # Gentle, which we're comparing it to).
+        oBoundary_sec = None
+        oPhonemeBefore = None
+        oPhonemeAfter = None
+        if boundaryIdx == 0:
+            # First boundary (start of first phoneme, no phoneme before it).
+            oBoundary_sec, _, oPhonemeAfter = otherTier.simple_transcript[boundaryIdx]
+        elif boundaryIdx == numBoundaries - 1:
+            # Last boundary (end of last phoneme, no phoneme after it).
+            _, oBoundary_sec, oPhonemeBefore = otherTier.simple_transcript[
+                boundaryIdx - 1
+            ]
+        else:
+            # Most phonemes (phoneme before and after it).
+            _, _, oPhonemeBefore = otherTier.simple_transcript[boundaryIdx - 1]
+            oBoundary_sec, _, oPhonemeAfter = otherTier.simple_transcript[boundaryIdx]
+        oBoundary_sec = float(oBoundary_sec)
+        print(f"oBoundary_sec: {oBoundary_sec}")
+        print(f"oPhonemeBefore: {oPhonemeBefore}")
+        print(f"oPhonemeAfter: {oPhonemeAfter}")
+
+        # If this boundary is between phonemes which can be replaced for one another,
+        # consider them to be a single phoneme and skip this boundary.
+        doCombinePhonemes = (
+            oPhonemeAfter in VALID_SYMBOL_REPLACEMENTS[oPhonemeBefore]
+            or oPhonemeBefore in VALID_SYMBOL_REPLACEMENTS[oPhonemeAfter]
+        )
+        if doCombinePhonemes:
+            print("Skipping this boundary\n\n")
+            continue
+
+        # Find the closest Gentle boundaries (one before, one after) to the current
+        # Other boundary. (Strategy: Iterate through Gentle boundaries, in order, until
+        # one is later than the target Other boundary.)
+        gBoundaryBefore_sec = None
+        gBoundaryAfter_sec = None
+        gBoundaryTemp = None
+        for start, _, _ in gentleTier.simple_transcript:
+            start = float(start)
+            if start > oBoundary_sec:
+                gBoundaryBefore_sec = gBoundaryTemp
+                gBoundaryAfter_sec = start
+                break
+            else:
+                gBoundaryTemp = start
+        # Handle the case where we make it to the end without Gentle having a later
+        # boundary.
+        if gBoundaryBefore_sec is None and gBoundaryAfter_sec is None:
+            gBoundaryBefore_sec = gBoundaryTemp
+        print(f"gBoundaryBefore_sec: {gBoundaryBefore_sec}")
+        print(f"gBoundaryAfter_sec: {gBoundaryAfter_sec}")
+
+        # Given the Gentle boundaries before and after the target Other boundary, check
+        # if either of the two Gentle boundaries have phonemes before and after that
+        # match the target Other boundary's phonemes before and after. If one does, use
+        # that Gentle boundary as the comparison and insert a results row. If not,
+        # insert a results row with no Gentle comparison.
+        insertQuery = """
+            INSERT INTO boundary(
+                other_phoneme_before,
+                other_phoneme_after,
+                gentle_has_match,
+                gentle_phoneme_before,
+                gentle_phoneme_after,
+                gentle_off_by_sec,
+                filepath,
+                timestamp
+            ) VALUES (
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?
+            );
+        """
+        gentleHasMatch = False
+        for gBoundary_sec in [gBoundaryBefore_sec, gBoundaryAfter_sec]:
+            print(f"gBoundary_sec: {gBoundary_sec}")
+            if gBoundary_sec is None:
+                continue
+
+            # Get the Gentle phonemes before and after the current Gentle boundary.
+            gPhonemeBefore = None
+            gPhonemeAfter = None
+            for start, end, gPhonemeSymbol in gentleTier.simple_transcript:
+                start, end = float(start), float(end)
+                # Gentle symbols are like "t_B", "t_I", or "t_E", where all we need is
+                # the "t".
+                gPhonemeSymbol = gPhonemeSymbol.split("_")[0]
+
+                if math.isclose(end, gBoundary_sec):
+                    gPhonemeBefore = gPhonemeSymbol
+                elif math.isclose(start, gBoundary_sec):
+                    gPhonemeAfter = gPhonemeSymbol
+            print(f"gPhonemeBefore: {gPhonemeBefore}")
+            print(f"gPhonemeAfter: {gPhonemeAfter}")
+
+            # Check if the Gentle phonemes surrounding the gentle boundary match the
+            # Other phonemes surrounding the Other boundary (including valid
+            # replacements as defined earlier).
+
+            matchingSymbolsBefore = {gPhonemeBefore}
+            matchingSymbolsBefore = (
+                matchingSymbolsBefore | VALID_SYMBOL_REPLACEMENTS[gPhonemeBefore]
+            )
+            isSymbolBeforeMatch = oPhonemeBefore in matchingSymbolsBefore
+
+            matchingSymbolsAfter = {gPhonemeAfter}
+            matchingSymbolsAfter = (
+                matchingSymbolsAfter | VALID_SYMBOL_REPLACEMENTS[gPhonemeAfter]
+            )
+            isSymbolAfterMatch = oPhonemeAfter in matchingSymbolsAfter
+
+            isBoundaryMatch = isSymbolBeforeMatch and isSymbolAfterMatch
+
+            # NOTE: can remove this check later, but for now check if it's ever the case
+            #   that the Gentle boundary before and after the target Other boundary both
+            #   match the target Other boundary (indicated by gentleHasMatch already
+            #   being True and then getting another isBoundaryMatch being True also)
+            if gentleHasMatch and isBoundaryMatch:
+                print(
+                    "The Gentle boundaries before and after both match the target Other boundary's phonemes??"
+                )
+                sys.exit(1)
+
+            if isBoundaryMatch:
+                gentleHasMatch = True
+                gentleOffBy_sec = gBoundary_sec - oBoundary_sec
+                insertParams = (
+                    oPhonemeBefore,
+                    oPhonemeAfter,
+                    gentleHasMatch,
+                    gPhonemeBefore,
+                    gPhonemeAfter,
+                    gentleOffBy_sec,
+                    filepath,
+                    oBoundary_sec,
+                )
+                dbConn.execute(insertQuery, insertParams)
+                print(f"inserted {insertParams}\n\n")
+
+        if not gentleHasMatch:
+            insertParams = (
+                oPhonemeBefore,
+                oPhonemeAfter,
+                gentleHasMatch,
+                None,
+                None,
+                None,
+                filepath,
+                oBoundary_sec,
+            )
+            dbConn.execute(insertQuery, insertParams)
+            print(f"inserted {insertParams}\n\n")
+
+    input()
+
+
+def createReportComparingGentleAndOther_OLD(rootDir, reportsDir="./comparisonReports"):
+    """Go through every folder in a directory and look at all the Gentle output JSON
+    files (which should have had an associated .textGrid file generated to compare
+    Gentle and Other's phone timings.) Make charts describing the aggregate results of
+    all the comparisons. These charts report on stuff like average timing diff,
+    distribution of timing diffs, what phones did Gentle have trouble with, which phones
+    were replaced for others, etc.
+
+    :param str rootDir: Path to root of directory structure to traverse and find
+        all the Gentle output (`X_gentlePhoneTimings.json`) and their corresponding
+        `X.textGrid` files.
+    :param str reportsDir: Absolute or relative path (relative to where the script is
+        run from) to where we want to save the reports (.png's of charts, etc.)
+
+    No return value. Instead, save a bunch of files to disk.
+
+    DEPRECATED. THIS IS HOW TYLER FIRST THOUGHT TO COMPARE TIMINGS, PHONEME-CENTRIC
+    (both the start and end of each phoneme). THE NEW METHOD IS BOUNDARY-CENTRIC, TO
+    SIMPLIFY ANALYSIS / REPORTING AND BE CONSISTENT WITH EXISTING PAPERS.
     """
 
     #####
@@ -67,7 +515,9 @@ def createReportComparingGentleAndOther(rootDir, reportsDir="./comparisonReports
                 textGridFilename = f"{filenameBase}.textGrid"
                 textGridFilepath = os.path.join(path, textGridFilename)
                 try:
-                    fileResults = compareGentleAndOtherTextGridTiers(textGridFilepath)
+                    fileResults = compareGentleAndOtherTextGridTiers_OLD(
+                        textGridFilepath
+                    )
                 except TextGridException:
                     continue
 
@@ -481,11 +931,7 @@ def createReportComparingGentleAndOther(rootDir, reportsDir="./comparisonReports
         f.write(f"Recordings excluded: {numSentencesExcluded}\n")
 
 
-class TextGridException(Exception):
-    pass
-
-
-def compareGentleAndOtherTextGridTiers(filepath):
+def compareGentleAndOtherTextGridTiers_OLD(filepath):
     """For a TextGrid file with a tier for Gentle timings and a tier for Other timings
     (such as TIMIT), find nearby matches between the phones in each tier and get the
     differences in start and end timings.
@@ -517,6 +963,9 @@ def compareGentleAndOtherTextGridTiers(filepath):
         - containsOOV: bool, whether or not there was a word "out-of-vocabulary" for
             Gentle and thus the matching of phones between Gentle and Other is more
             likely to get messed up.
+
+    DEPRECATED. SEE DEPRECATION NOTE IN createReportComparingGentleAndOther_OLD
+    DOCSTRING.
     """
     try:
         textGrid = parseTextGrid.TextGrid.load(filepath)
@@ -845,7 +1294,14 @@ def getRepresentativeColor(
 
 
 ########################################################################################
+#
 # File manipulation helpers.
+#
+########################################################################################
+
+
+########################################################################################
+# File manipulation helpers -> TIMIT.
 ########################################################################################
 
 
@@ -1206,6 +1662,11 @@ def createTextGridsFromTimitPhnAndGentleJsonForAllTimit(timitDirpath):
                 convertTimitPhnAndGentleJsonToTextGrid(path, filenameBase)
 
 
+########################################################################################
+# File manipulation helpers -> Sergey hand-done segmentations.
+########################################################################################
+
+
 def createDirOfWavAndTxtAndSergeyTextgrids(sergeyDataDirpath):
     """Take a folder of Sergey's collected + hand-segmented T5/T11 data, and organize
     files to be passed to our Gentle script.
@@ -1414,6 +1875,43 @@ def createTextGridsFromSergeyTextGridAndGentleJsonForWholeDir(inputDir):
             if filename.endswith("_gentlePhoneTimings.json"):
                 filenameBase = filename.split("_gentlePhoneTimings.json")[0]
                 convertSergeyTextgridAndGentleJsonToTextGrid(path, filenameBase)
+
+
+########################################################################################
+# File manipulation helpers -> T5 PennTreeBank passages.
+########################################################################################
+
+
+def createDirOfWavAndTxtForT5PenntreebankDataset(penntreebankDataDirpath):
+    """Take a folder of T5 PennTreeBank recordings and transcripts, and organize files
+    to be passed to our Gentle script.
+
+    :param str penntreebankDataDirpath: Path to root of directory structure to find the
+        T5 PennTreeBank data (the .txt transcripts and the recorded .wav files).
+
+    No return value. Instead, create a new dir that contains all the recorded .wav files
+        and .txt transcript files. One of each of those types of files for each
+        recording .wav file, named correspondingly.
+    """
+    wavFilesDirpath = os.path.join(penntreebankDataDirpath, "wav")
+    txtFilesDirpath = os.path.join(penntreebankDataDirpath, "transcribed passages")
+    # Add a new folder next to the existing ones, where we'll organize all the files
+    # so it's easy for our Gentle script.
+    combinedFilesDirpath = os.path.join(penntreebankDataDirpath, "combined_files")
+    try:
+        os.mkdir(combinedFilesDirpath)
+    except OSError:
+        pass
+
+    for wavFilename in os.listdir(wavFilesDirpath):
+        wavFilepath = os.path.join(wavFilesDirpath, wavFilename)
+        newWavFilepath = os.path.join(combinedFilesDirpath, wavFilename)
+        shutil.copy(wavFilepath, newWavFilepath)
+
+    for txtFilename in os.listdir(txtFilesDirpath):
+        txtFilepath = os.path.join(txtFilesDirpath, txtFilename)
+        newTxtFilepath = os.path.join(combinedFilesDirpath, txtFilename)
+        shutil.copy(txtFilepath, newTxtFilepath)
 
 
 if __name__ == "__main__":
